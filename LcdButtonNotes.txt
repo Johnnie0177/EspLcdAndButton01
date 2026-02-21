@@ -1,0 +1,154 @@
+
+Lcd Display And Buttons
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Description
+~~~~~~~~~~~
+	This project builds from prior assignments:
+		Homework/Assignment04/LcdDisplay/LcdHelloWorld/
+		Homework/Assignment01/County/
+
+	It start with a hello message on the lcd display, then monitors activity on a push button.  When button actions occur, they are interpreted as high level events: single click, double click, etc.  The events are reported to the user by posting messages on lcd display.
+
+
+Implementation
+~~~~~~~~~~~~~~
+	Prior assignments had clunky monolithic code to, respectively, monitor a button and talk to the lcd display.  Here the lcd display and push button are given dedicated managers, implemented as separate idf components, which will be reusable in future work.  Claude helped immensely, see the chats below for details.
+
+
+Button Manager
+~~~~~~~~~~~~~~
+	A push button is connected to any available gpio pin, to connect to ground when pressed.  The button manager, told the pin number when initialized, sets the pin to read mode, and sets an internal pullup resistor.  It monitors the button state, pressed or not, and determines click events: single click, double click, long press, and long press release.  When initialized, the button manager is given callback functions for each event.
+
+	The button manager is designed in layers, starting with button actions (press or release) triggering an interrupt, whose handler populates a queue of actions.  Actions are expected to alternate, any duplicates are ignored.  The queue is read by a looping reader task that updates states in a state machine.  States include first press, first release, second press, long press, and so on.  Importantly, the reader task only updates the state machine, it does not measure time and does not call back to any client code, so the action queue is perpetually emptied.  A second monitor task loops on a deliberate cadence, periodically checking the state of the state machine and keeping action timestamps.  With the timestamps it determines single clicks, double clicks, long presses, and long press releases.  When events are determined, the monitor task calls the appropriate callback, and the client code can do its business, per event.  The client code can take arbitrarily long to run, and it runs in the monitor task's context.  So the monitor doesn't continue tracking button actions while client is busy, and thus doesn't make further callback calls while the client is busy.  Meanwhile, the reader task continues to read and empty the queue of button actions, and maintains the state machine in real time.  So when the client is done, the monitor task resumes checking on the state machine, which is (always) up to date.
+
+	This button manager can only monitor one push button.  Tracking multiple button states simultaneously will require rework to the manager.
+
+
+Lcd Display Manager
+~~~~~~~~~~~~~~~~~~~
+	The lcd display has two lines of sixteen characters each.  It is connected to two specific gpio pins, 13 and 14, and to the 5v supply and ground.  The lcd manager communicates to the display via i2c protocol on these two pins.  It provides high level pubic functions to overwrite the top line, overwrite the second line, or activate a blinking cursor.
+
+	The lcd manager is designed in layers, starting with i2c initialization and scanning.  With the display recognized on the i2c bus, the lcd manager sends primitive commands to the display, involving much bit munging.  The primitives include initializing the display, placing a cursor at a specified row and column, writing characters at the cursor location, and making the cursor visible to the user.  Using these primitives, public functions allow the client to write strings to one row or the other, or to show the curor.
+
+
+Lessons Learned
+~~~~~~~~~~~~~~~
+	This project required learning about idf components.  Separating code out from a single monolithic main function, and further out from the main component, was non trivial.  Lessons learned include the following.
+
+	Idf expects the 'main' component to exist, it's the top level, thus the 'main' directory cannot be renamed.  Any c file under main can implement 'app_main', and one of them must.
+
+	Other (non main) components must reside in a 'components' subdirectory, otherwise they are not recognized as components, and linking fails.  And the main component must specify its component dependencies, via 'include_dirs' to see their headers, and 'requires' clauses for linking.
+
+
+Claude Chat  idf components
+~~~~~~~~~~~
+	Chat
+		https://claude.ai/chat/5e103f9d-eef0-4182-abf3-5a60f613ae6e
+
+	Query
+		In an idf development project, directory main/ has a file main.c that defines function app_main(), and it builds successfully.   Changing the file main.c to Main.c also allows the build to succeed.  But changing the directory from main/ to Main/ breaks the build, showing error: (.text.main_task+0xa1): undefined reference to 'app_main'
+
+		Does the app_main() function have to be defined in a particular file or a particular directory?
+
+	Reply
+		The error you're seeing is not about the filename or directory name per se -- it's about how ESP-IDF's CMake build system locates and registers the "main" component.
+
+		In ESP-IDF, app_main does not have to be defined in any particular file -- that's why renaming main.c to Main.c works fine. The linker just finds the symbol wherever it ends up in the compiled output.
+
+		What does matter is the component name, and the component name is derived from the directory name. ESP-IDF has a special built-in component called main. When your top-level CMakeLists.txt does something like:
+			idf_build_process(...)
+		or uses the standard project template, the build system looks for a component named exactly main (lowercase) in a directory named main/. That component gets linked with a specific linker script fragment that references app_main as the entry point called by main_task in esp_system.
+
+		When you rename the directory to Main/, CMake may still find and compile it (depending on your CMakeLists.txt), but the component is now named Main rather than main. The linker script that pulls in app_main is tied to the main component, so if the component isn't registered under that exact name, app_main never gets linked into the final binary -- hence the undefined reference.
+
+		The rule: app_main() can live in any source file, and that file can be named anything. But it must reside in a component registered with the name main (all lowercase), which in practice means the directory must be named main/ -- unless you explicitly rename the component back to main inside the directory's own CMakeLists.txt with:
+			idf_component_register(SRCS "Main.c" ...)
+		and ensure the project-level CMakeLists.txt still lists it under the name main. The simplest fix is just to keep the directory named main/.
+
+	Acknowledgement
+		Gotcha.  That explains a lot, thanks claude.
+
+	Reply
+		You're welcome! It's one of those subtle ESP-IDF quirks that isn't very well documented -- the component name being derived from the directory name is easy to overlook. Good luck with your project!
+
+	Query
+		How does idf know which components, other than main, to build?
+
+	Reply
+		ESP-IDF discovers components from a few places:
+
+		Built-in components live in $IDF_PATH/components/ and are part of the ESP-IDF installation itself (things like esp_wifi, nvs_flash, driver, etc.). These are always available to any project.
+
+		Your project's extra components can come from:
+			* A components/ directory sitting alongside your project's top-level CMakeLists.txt. Any subdirectory in there that contains a CMakeLists.txt with an idf_component_register() call is automatically picked up as a component.
+			* Directories listed in the EXTRA_COMPONENT_DIRS variable in your project's top-level CMakeLists.txt, which lets you point to component collections outside the project tree.
+			* The newer IDF Component Manager (managed-components/), which pulls in components declared in idf_component.yml from the component registry at components.espressif.com.
+
+		Which ones actually get compiled is determined by dependency resolution. ESP-IDF doesn't blindly build every discovered component -- it starts from the main component and follows the REQUIRES and PRIV_REQUIRES arguments in each component's idf_component_register() call to build a dependency graph. Only components that are reachable in that graph get compiled and linked. This is why if you add a component to components/ but don't declare it as a requirement of anything, it won't be included in the build.
+
+	Query
+		I see.  Please show the syntax of the 'requires' clause, in main's cmakelists.txt file, to include a component named FooManager, which exists in components/FooManager.
+
+	Reply
+		In main/CMakeLists.txt:
+			idf_component_register(
+				SRCS "main.c"
+				INCLUDE_DIRS "."
+				REQUIRES FooManager)
+
+		The component name in REQUIRES matches the directory name under components/, so components/FooManager/ would be referenced as FooManager. Case matters here for the same reason you just discovered with the main directory.
+
+	Query
+		components/FooManager/ has file FooManager.c and header FooManager.h.  Should the includes_dirs clause specify "FooManager" or "../components/FooManager" or something else?
+
+	Note: the query above was intended to ask how the includes_dirs clause in main's cmakelists should read.  But I forget to specify which cmakelists, no worries, claude's reply covered both, wow:
+
+	Reply
+		The INCLUDE_DIRS in FooManager's own CMakeLists.txt is what controls this. It should look like:
+			idf_component_register(
+				SRCS "FooManager.c"
+				INCLUDE_DIRS ".")
+
+		Using "." means "this component's own directory." When main lists FooManager in its REQUIRES, ESP-IDF automatically makes FooManager's public include directories visible to main. So in main.c you can just write:
+			#include "FooManager.h"
+		without needing any path prefix, and without touching INCLUDE_DIRS in main's CMakeLists.txt at all. That's the benefit of the dependency system -- include path propagation is handled automatically.
+
+
+Claude Chat  idf main component
+~~~~~~~~~~~
+	Chat
+		https://claude.ai/chat/09ae2f4f-1f8e-4a90-9a47-e25821617325
+
+	Query
+		Using idf build to compile main.c in a subdirectory.  The subdirectory has a cmakelists.txt file that uses a idf_component_register directive to specify the source files, e.g. main.c.  Moving main.c to the top level directory, and putting idf_component_register into the top level cmakelists.txt, causes error "Called idf_component_register from a non-component directory".  Is there a way to specify sources to compile from the top level cmakelists.txt file?
+
+	Reply
+		The short answer is: not directly with idf_component_register, because the ESP-IDF build system enforces that this macro is only called from a directory registered as a component (i.e., listed in COMPONENT_DIRS and containing its own CMakeLists.txt).
+
+		The "non-component directory" error is intentional -- IDF's CMake wrapper checks the calling context and rejects idf_component_register at the project level.
+
+		Your options:
+
+		1. Keep the subdirectory, just rename or reorganize it The subdirectory doesn't have to be called main. You can create src/CMakeLists.txt with idf_component_register(SRCS "main.c" ...) and register it in the top-level CMakeLists.txt via:
+			list(APPEND EXTRA_COMPONENT_DIRS "src")
+
+		This keeps your source wherever you want while satisfying IDF's component model.
+
+		2. Keep main/ but symlink or configure the source path Inside main/CMakeLists.txt, you can reference source files from the parent directory:
+			idf_component_register(
+				SRCS "../main.c"
+				INCLUDE_DIRS ".")
+
+		The file physically stays at the top level; the component just points up to it.
+
+		3. Use target_sources() after idf_build_process() After the project-level idf_build_process() call, you can retrieve the app target and add sources to it directly:
+			idf_build_process(...)
+			idf_build_get_property(app_target APP_EXECUTABLE)
+			target_sources(${app_target} PRIVATE ${CMAKE_SOURCE_DIR}/main.c)
+
+		This is somewhat fragile and undocumented, so treat it as a workaround rather than a supported pattern.
+
+		Recommended approach is option 2 -- keep the required main/CMakeLists.txt stub but point its SRCS at ../main.c. It's clean, supported, and requires minimal restructuring. The IDF component model is fairly rigid by design, so working with it rather than around it tends to save pain later.
+
+
