@@ -8,7 +8,12 @@ Description
 		Homework/Assignment04/LcdDisplay/LcdHelloWorld/
 		Homework/Assignment01/County/
 
-	It start with a hello message on the lcd display, then monitors activity on a push button.  When button actions occur, they are interpreted as high level events: single click, double click, etc.  The events are reported to the user by posting messages on lcd display.
+	The program starts with a hello message on the lcd display, then monitors activity on a push button.  When button actions occur, they are interpreted as high level events: single click, double click, etc.  The events are reported to the user by posting messages on lcd display.
+
+
+GitHub
+~~~~~~
+	https://github.com/Johnnie0177/EspLcdAndButton01
 
 
 Implementation
